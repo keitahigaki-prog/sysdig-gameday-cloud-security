@@ -2,6 +2,8 @@
 
 AWS × Sysdig Secureを使った、チーム対抗型のクラウドセキュリティ演習(GameDay)一式。2026年にSysdigで実施したパイロット回(6チーム規模)の実際の構築物をベースに、他の人が同じ演習を再現できるよう整理したもの。
 
+想定読者は、この演習を自分の組織で運営する側(AWS Organizations・IAM Identity Center・Sysdig Secureテナントに対する管理者権限を持つ人)。参加チーム側は、運営から渡されたログイン情報でSysdig Secureをオンボーディングし、検知・初動対応を行うだけで良い。
+
 「オンボーディングしていないと攻撃が見えない」→「Sysdigを接続すると初めて侵害が見える」→「検知を見ながら初動対応する」という体験を、各チーム専用のAWSアカウント+EKSクラスタ上で再現する。
 
 ## これは何をする演習か
@@ -27,9 +29,13 @@ docs/             設計・採点・撤去手順のドキュメント
 
 ## 前提条件
 
-- チームの数だけ分離されたAWSアカウント(Organizationで一括管理、OUでまとめておくと楽)
-- 各チームのAWSアカウントにSSO等でアクセスできるロール(IAM Identity CenterのPermission Set等)
-- Sysdig Secureのテナント(チームごとにZoneを1つずつ作成して権限を分離)
+運営側が事前に準備しておく必要があるもの。特に最初の2つはTerraformやスクリプトの範囲外(AWSコンソール/IAM Identity Center UIでの手作業)なので、他のメンバーに引き継ぐ際は見落とされやすい。
+
+- **チームの数だけ分離されたAWSアカウント**(Organizationで一括管理、GameDay用のOUを1つ作ってその下にぶら下げると楽)
+- **IAM Identity Centerで、チームごとに「ログイン可能なUser」と「Permission Set(例: `GameDayParticipantAccess`)」を作成し、各チームのアカウントにAccount Assignmentまで済ませておく**
+  - OUとPermission Setを定義しただけでは入れない。実際にUserを作成し、本人に招待メール(またはログイン情報)を届けるところまでが必須([`docs/architecture.md`](docs/architecture.md)の「教訓」参照)
+- **運営の手元の端末で、チームごとのAWS CLIプロファイルを設定しておく**(`aws configure sso` 等で、プロファイル名は `gameday-team-a` のようにチーム名を含める。Terraform/シェルスクリプト側がこの命名を前提にしている)
+- **Sysdig Secureのテナントで、チームごとにZoneを1つずつ作成しておく**(Sysdig Secure UIの Settings > Zones。各ZoneをそのチームのEKSクラスタにスコープすることで、チームは自分の検知・スコアだけが見える状態になる)
 - `terraform`, `kubectl`, `aws` CLI, `helm`
 
 ## セットアップ手順
@@ -42,7 +48,7 @@ cp teams.conf.example teams.conf
 # teams.conf を編集し、各チームの 実際のAWSアカウントID / IAM Identity Centerのロール名 を入れる
 ```
 
-`teams.conf`は実際のアカウントIDを含むため`.gitignore`対象。コミットされるのは`teams.conf.example`(プレースホルダのみ)だけ。
+`teams.conf`は実際のアカウントIDを含むため`.gitignore`対象。コミットされるのは`teams.conf.example`(プレースホルダのみ)だけ。ロール名の確認方法は`teams.conf.example`内のコメントを参照。
 
 ### 2. 各チームのEKSクラスタを構築する
 
@@ -51,6 +57,8 @@ cp teams.conf.example teams.conf
 ```
 
 チームごとに`~/gameday-eks-<team>/`を作成し、`terraform apply`を実行する。完了後、出力されるコマンドで各チームのkubeconfigにcontextを登録する。
+
+リージョンは`terraform/eks/main.tf`の`region`変数で既定`ap-southeast-2`(Sydney)。別リージョンで実施する場合は、`provision_all_teams.sh`が生成する`terraform.tfvars`に`region = "..."`を追記するか、`main.tf`側の`default`を書き換える。
 
 ### 3. 脆弱なアプリと攻撃を展開する
 
@@ -68,7 +76,9 @@ kubectl --context <team> apply -f k8s/03_attacks_webshell.yaml
 
 ### 5. スコアボードを開く
 
-`scoreboard/index.html`をブラウザで開く(Sysdig MCPサーバーに接続できるCowork環境を想定。それ以外の環境で使う場合は`fetchAutoForTeam`内のMCP呼び出し部分を、使う環境のAPI呼び出しに置き換える)。
+`scoreboard/index.html`をブラウザで開く。
+
+**注意**: 自動判定部分(オンボーディング・検知・初動対応・Wave2-aブロック)は、Sysdig Secure MCPサーバーに接続できるCowork環境で開くことを前提にしている。それ以外の環境(素のブラウザ単体など)で使う場合、自動判定は動かないため、`fetchAutoForTeam`内のMCP呼び出し部分を、Sysdig REST APIなど使う環境のAPI呼び出しに書き換える必要がある。手動判定分(Wave2-b・インシデントレポート提出など、[`docs/scoring.md`](docs/scoring.md)参照)はMCPに依存せずブラウザのlocalStorageだけで動く。
 
 ### 6. Wave2(再攻撃)で検証する
 
