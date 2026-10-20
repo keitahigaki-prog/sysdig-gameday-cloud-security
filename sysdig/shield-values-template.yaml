@@ -1,0 +1,49 @@
+# Sysdig Shield Helm values テンプレート(team-a検証用の下書き)
+#
+# 重要: features.* 以下のキー名はWeb検索(sysdiglabs/charts、charts.sysdig.com)からの推測で、
+# 実際にteam-aに入っているShieldチャートのバージョンと完全一致するかは未確認です。
+# 適用前に必ず次のコマンドで実際のキー名を確認してください(14.8.0のenter/exit event問題のように
+# 「思っていたのと違う」ことがよくあるため、今回も推測だけで当てにいかない):
+#
+#   helm show values sysdig/shield --version <現在入れているバージョン相当> | less
+#   # または、すでに team-a に入っている release の現在値を見る場合
+#   helm get values <release名> -n <namespace> -o yaml
+#
+# 既存のteam-a用valuesに、下の features.vulnerability_management / cluster_shield.features.admission_control
+# の部分だけ追記する想定です(cluster_config / sysdig_endpoint は既存の値をそのまま使う)。
+
+cluster_config:
+  name: team-a  # team-b〜eは展開時にここだけ変える
+
+sysdig_endpoint:
+  region: custom
+  api_url: "<既存の値を使う>"
+  collector:
+    host: "<既存の値を使う>"
+    port: "<既存の値を使う>"
+  access_key: "<既存の値を使う>"
+
+# --- ここから下が今回の追加分(VM/脆弱性管理を有効化) ---
+features:
+  kubernetes_metadata:
+    enabled: true
+  posture:
+    host_posture:
+      enabled: true
+    cluster_posture:
+      enabled: true
+  vulnerability_management:
+    host_vulnerability_management:
+      enabled: true   # ← これが今回追加したいフラグ(未確認、helm show valuesで要確認)
+
+cluster_shield:
+  features:
+    admission_control:
+      container_vulnerability_management:
+        enabled: true  # ← コンテナイメージの脆弱性管理(デフォルトfalseとの情報あり、未確認)
+
+# 適用コマンドの例(既存のreleaseにこのvaluesを重ねてupgrade):
+#   helm upgrade <release名> sysdig/shield -n <namespace> -f shield-values-template.yaml --reuse-values
+#
+# 適用後、しばらく待ってから(VMスキャンは即時ではない可能性が高い)下記で確認:
+#   query_vulnerability_findings(group_by=image, filters=[{field:"cluster", op:"eq", value:"team-a"}])

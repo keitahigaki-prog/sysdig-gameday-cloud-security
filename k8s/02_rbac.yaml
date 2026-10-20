@@ -1,0 +1,35 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: webapp-sa-role
+  namespace: gameday
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: webapp-sa-binding
+  namespace: gameday
+subjects:
+  - kind: ServiceAccount
+    name: webapp-sa
+    namespace: gameday
+roleRef:
+  kind: Role
+  name: webapp-sa-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# このSecretは演習用のダミー認証情報。実在のシステムでは使われていないパスワードなので、
+# そのままコミット・公開して問題ない(real_credentialsではない、攻撃者に「窃取させる」ための教材データ)。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-credentials
+  namespace: gameday
+type: Opaque
+stringData:
+  username: gameday-admin
+  password: SuperSecretPilotPassword123

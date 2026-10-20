@@ -1,0 +1,14 @@
+# チームごとの設定ファイル(実行時に teams.conf としてコピーして値を埋める)。
+# teams.conf は .gitignore 対象なので、実アカウントIDやロール名をコミットしてしまう心配はない。
+#
+# 書式: チーム名|AWSアカウントID|GameDayParticipantAccess許可セットのロール名(フルネーム)
+#
+# ロール名の確認方法:
+#   aws iam list-roles --profile gameday-<team> | grep GameDayParticipantAccess
+#
+# 例(そのままでは動きません。自分の環境の値に置き換えてください):
+team-a|111111111111|AWSReservedSSO_AWSAdministratorAccess_xxxxxxxxxxxxxxxx
+team-b|222222222222|AWSReservedSSO_AWSAdministratorAccess_xxxxxxxxxxxxxxxx
+team-c|333333333333|AWSReservedSSO_AWSAdministratorAccess_xxxxxxxxxxxxxxxx
+team-d|444444444444|AWSReservedSSO_AWSAdministratorAccess_xxxxxxxxxxxxxxxx
+team-e|555555555555|AWSReservedSSO_AWSAdministratorAccess_xxxxxxxxxxxxxxxx

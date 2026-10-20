@@ -1,0 +1,14 @@
+# VM(脆弱性管理)有効化の差分values。
+# helm get values / helm show values --version 1.53.0 で実キーを確認済み。
+# features.vulnerability_management 配下に host_vulnerability_management と
+# container_vulnerability_management があり、features.admission_control という
+# 別セクションに container_vulnerability_management(アドミッションコントロール用の
+# ゲート、今回は対象外)がある。下書きにあった cluster_shield.* というトップレベル
+# キーはこのチャート(shield-1.53.0)には存在しない。
+
+features:
+  vulnerability_management:
+    host_vulnerability_management:
+      enabled: true
+    container_vulnerability_management:
+      enabled: true

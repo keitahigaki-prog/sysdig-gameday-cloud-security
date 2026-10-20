@@ -1,0 +1,141 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gameday
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: webapp-sa
+  namespace: gameday
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vulnerable-app-code
+  namespace: gameday
+data:
+  app.py: |
+    import subprocess
+    import yaml
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import urlparse, parse_qs
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            query = parse_qs(urlparse(self.path).query)
+            if urlparse(self.path).path == "/config":
+                data = query.get("data", ["{}"])[0]
+                # 教材用に意図的に残した安全でないデシリアライズ(PyYAML CVE-2020-14343系)
+                parsed = yaml.load(data, Loader=yaml.Loader)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(str(parsed).encode())
+                return
+            host = query.get("host", ["127.0.0.1"])[0]
+            # 教材用に意図的に残したコマンドインジェクション脆弱性
+            result = subprocess.run(f"ping -c 1 {host}", shell=True, capture_output=True, text=True)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(result.stdout.encode() + result.stderr.encode())
+
+    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vulnerable-webapp
+  namespace: gameday
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vulnerable-webapp
+  template:
+    metadata:
+      labels:
+        app: vulnerable-webapp
+    spec:
+      serviceAccountName: webapp-sa
+      containers:
+        - name: webapp
+          # 意図的に古いベースイメージを使用(脆弱性修正フェーズ用にCVEを持たせている)
+          image: python:3.9-slim
+          command: ["/bin/sh", "-c", "apt-get update >/dev/null 2>&1; apt-get install -y curl >/dev/null 2>&1; pip install pyyaml==5.3.1 >/dev/null 2>&1; python3 /app/app.py"]
+          # 意図的なアンチパターン: Secretを環境変数としても渡している(予防フェーズで指摘・修正してもらう対象)。
+          # 攻撃者がenvで機密情報を直接ダンプできてしまう経路を作ることで、
+          # Sysdigの「Dump Sensitive Environment Variables」(High確信度)を確実に発火させる。
+          envFrom:
+            - secretRef:
+                name: db-credentials
+          volumeMounts:
+            - name: code
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap:
+            name: vulnerable-app-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vulnerable-webapp
+  namespace: gameday
+spec:
+  selector:
+    app: vulnerable-webapp
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# ここから下は調査フェーズ用のデコイ(攻撃・検知ロジックとは無関係)。
+# namespace内に「本物っぽい別のワークロードと別のSecret」を置くことで、
+# 「侵害されたのは本当にどのPod/SA/Secretか」をログで裏取りさせる。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: internal-tool-credentials
+  namespace: gameday
+type: Opaque
+stringData:
+  api_token: "dummy-unrelated-token-do-not-use"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: internal-dashboard-sa
+  namespace: gameday
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: internal-dashboard
+  namespace: gameday
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: internal-dashboard
+  template:
+    metadata:
+      labels:
+        app: internal-dashboard
+    spec:
+      serviceAccountName: internal-dashboard-sa
+      containers:
+        - name: dashboard
+          image: nginx:1.25-alpine
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: internal-dashboard
+  namespace: gameday
+spec:
+  selector:
+    app: internal-dashboard
+  ports:
+    - port: 80
+      targetPort: 80

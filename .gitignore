@@ -1,0 +1,27 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!terraform.tfvars.example
+
+# チーム情報(実際のAWSアカウントID・ロール名入り)
+teams.conf
+
+# kubeconfig
+kubeconfig
+*.kubeconfig
+.kube/
+
+# Sysdig実認証情報
+.sysdig-token
+sysdig/shield-values-real.yaml
+sysdig/*secret*.yaml
+
+# 環境変数
+.env
+.env.*
+
+# OS/エディタ
+.DS_Store
+*.swp
